@@ -7,7 +7,7 @@ import QtQuick.Controls.Material 2.15
 ApplicationWindow {
     visible: true
     width: 1366
-    height: 800
+    height: 820
     title: "Mi Foto carnet"
 
     Material.theme: Material.Light
@@ -618,7 +618,7 @@ ApplicationWindow {
                             }
                             
                             Label {
-                                text: "• Detección automática de rostros\n• Múltiples tamaños internacionales\n• Impresión optimizada en papel 15.2x10.2 cm\n• Datos personales opcionales\n• Cambio de fondo con IA (MediaPipe)\n• Ajustes de imagen profesionales\n• Guías de corte para recorte preciso"
+                                text: "• Detección automática de rostros\n• Múltiples tamaños internacionales\n• Impresión optimizada en papel 15.2x10.2 cm\n• Datos personales opcionales\n• Cambio de fondo\n• Ajustes de imagen profesionales\n• Guías de corte para recorte preciso"
                                 font.pixelSize: 14
                                 color: "#666"
                                 Layout.alignment: Qt.AlignHCenter
@@ -638,7 +638,7 @@ ApplicationWindow {
                             }
                             
                             Label {
-                                text: "OpenCV, MediaPipe Selfie Segmentation, PyQt6"
+                                text: "• OpenCV\n• Material Design con PyQt6\n• Remoción de fondo con Api de Photoroom"
                                 font.pixelSize: 12
                                 color: "#666"
                                 Layout.alignment: Qt.AlignHCenter
@@ -778,51 +778,6 @@ ApplicationWindow {
                                 }
                             }
                         }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 5
-
-                            Label { 
-                                text: "Insertar datos personales"
-                                font.bold: true
-                                font.pixelSize: 16
-                                Layout.fillWidth: true
-                            }
-
-                            Switch {
-                                id: textVisibilitySwitch
-                                checked: false
-                                onCheckedChanged: {
-                                    imageProcessor.adjustImageForPersonalData(checked, 0.2)
-                                }
-                            }
-                        }
-
-                        TextField {
-                            id: nameField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 48
-                            placeholderText: "Nombres"
-                            onTextChanged: imageProcessor.name = text
-                        }
-
-                        TextField {
-                            id: lastNameField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 48
-                            placeholderText: "Apellidos"
-                            onTextChanged: imageProcessor.lastname = text
-                        }
-
-                        TextField {
-                            id: rutField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 48
-                            placeholderText: "RUT"
-                            onTextChanged: imageProcessor.rut = text
-                        }
-
                         // Selector de color de fondo
                         Label {
                             text: "Color de fondo:"
@@ -865,15 +820,59 @@ ApplicationWindow {
                             text: "Cambiar Fondo"
                             Layout.fillWidth: true
                             Layout.preferredHeight: 48
-                            Material.background: Material.Purple
+                            Material.background: Material.DeepOrange
                             onClicked: {
-                                if (imageProcessor.removeBackgroundWithU2Net()) {
+                                if (imageProcessor.removeBackgroundWithPhotoRoom()) {
                                     console.log("Fondo cambiado exitosamente")
                                 } else {
                                     console.log("Error al cambiar el fondo")
                                 }
                             }
                             enabled: imageProcessor.isCentered
+                        }
+                        
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 5
+
+                            Label { 
+                                text: "Insertar datos personales"
+                                font.bold: true
+                                font.pixelSize: 16
+                                Layout.fillWidth: true
+                            }
+
+                            Switch {
+                                id: textVisibilitySwitch
+                                checked: false
+                                onCheckedChanged: {
+                                    imageProcessor.adjustImageForPersonalData(checked, 0.2)
+                                }
+                            }
+                        }
+
+                        TextField {
+                            id: nameField
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
+                            placeholderText: "Nombres"
+                            onTextChanged: imageProcessor.name = text
+                        }
+
+                        TextField {
+                            id: lastNameField
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
+                            placeholderText: "Apellidos"
+                            onTextChanged: imageProcessor.lastname = text
+                        }
+
+                        TextField {
+                            id: rutField
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
+                            placeholderText: "RUT"
+                            onTextChanged: imageProcessor.rut = text
                         }
                     }
 

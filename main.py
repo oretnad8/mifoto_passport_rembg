@@ -1,15 +1,20 @@
 """
 Mi Foto Carnet - Aplicación para preparación e impresión de fotos tipo carnet
-Versión 1.0
+Versión 1.2 - Con PhotoRoom API para remoción de fondo
 
 Dependencias requeridas:
-pip install PyQt6 opencv-python mediapipe numpy
+pip install PyQt6 opencv-python numpy requests pillow
 
-MediaPipe Selfie Segmentation se usa para eliminación precisa del fondo.
+PhotoRoom API se usa para eliminación precisa del fondo.
+La configuración se carga desde config.json (se crea automáticamente si no existe).
 """
 
 import sys
 import os
+import io
+import base64
+import json
+import requests
 from PyQt6.QtCore import QUrl, QObject, pyqtSlot, QSize, pyqtProperty, QRect, pyqtSignal, Qt, QSizeF
 from PyQt6.QtGui import QGuiApplication, QImage, QPainter, QPageSize, QPageLayout, QTransform, QPen, QColor
 from PyQt6.QtQml import QQmlApplicationEngine
@@ -17,9 +22,7 @@ from PyQt6.QtQuick import QQuickImageProvider
 from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
 import cv2
 import numpy as np
-import torch
-from u2net import load_model
-from u2net import U2NET
+from PIL import Image
 
 class ImageProcessor(QObject):
     nameChanged = pyqtSignal()
@@ -33,6 +36,7 @@ class ImageProcessor(QObject):
     saturationChanged = pyqtSignal()
     showCutGuidesChanged = pyqtSignal()
     backgroundColorChanged = pyqtSignal()
+    processingStatusChanged = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -42,9 +46,6 @@ class ImageProcessor(QObject):
         self.centered_original = None  # Para guardar la imagen centrada sin ajustes
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-        self.model = U2NET(3, 1)  # La entrada tiene 3 canales (RGB) y la salida es una máscara de 1 canal
-        self.u2net_model = load_model('./saved_models/u2net.pth')  # Asegúrate de que el modelo está en esta carpeta
-        self.model.eval()  # Configura el modelo en modo evaluación
         self._name = ""
         self._lastname = ""
         self._rut = ""
@@ -59,11 +60,71 @@ class ImageProcessor(QObject):
         self._backgroundColor = "#FFFFFF"
         self.background_removed_image = None
         self.mask = None
+        
+        # Cargar configuración
+        self.load_config()
 
-    def __del__(self):
-        """Limpieza al destruir el objeto"""
-        if hasattr(self, 'selfie_segmentation'):
-            self.selfie_segmentation.close()
+    def load_config(self):
+        """Carga la configuración desde config.json"""
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        
+        # Configuración por defecto
+        default_config = {
+            "photoroom_api": {
+                "api_key": "sandbox_sk_pr_default_17cd6ae01b3ecf6d6118892628decb627d2e65a4",
+                "api_url": "https://sdk.photoroom.com/v1/segment"
+            },
+            "app_settings": {
+                "default_dpi": 300,
+                "paper_width_mm": 152,
+                "paper_height_mm": 102,
+                "margin_safety_mm": 5,
+                "margin_between_photos_mm": 2,
+                "max_photos_per_sheet": 8
+            }
+        }
+        
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    self.photoroom_api_key = config.get("photoroom_api", {}).get("api_key", default_config["photoroom_api"]["api_key"])
+                    self.photoroom_api_url = config.get("photoroom_api", {}).get("api_url", default_config["photoroom_api"]["api_url"])
+                    self.app_settings = config.get("app_settings", default_config["app_settings"])
+                    print(f"Configuración cargada desde {config_path}")
+                    print(f"Modo API: {config.get('photoroom_api', {}).get('mode', 'sandbox')}")
+            else:
+                # Usar configuración por defecto
+                self.photoroom_api_key = default_config["photoroom_api"]["api_key"]
+                self.photoroom_api_url = default_config["photoroom_api"]["api_url"]
+                self.app_settings = default_config["app_settings"]
+                print("Usando configuración por defecto (archivo config.json no encontrado)")
+                
+                # Crear archivo de configuración por defecto
+                with open(config_path, 'w') as f:
+                    json.dump({
+                        "photoroom_api": {
+                            "api_key": self.photoroom_api_key,
+                            "api_url": self.photoroom_api_url,
+                            "mode": "sandbox",
+                            "comment": "Para producción, cambia 'mode' a 'production' y actualiza la 'api_key'"
+                        },
+                        "app_settings": self.app_settings,
+                        "image_processing": {
+                            "face_detection_scale_factor": 1.1,
+                            "face_detection_min_neighbors": 5,
+                            "face_detection_min_size": [30, 30],
+                            "face_crop_multiplier": 2.2
+                        }
+                    }, f, indent=2)
+                    print(f"Archivo de configuración creado en {config_path}")
+                    
+        except Exception as e:
+            print(f"Error al cargar configuración: {str(e)}")
+            # Usar valores por defecto en caso de error
+            self.photoroom_api_key = default_config["photoroom_api"]["api_key"]
+            self.photoroom_api_url = default_config["photoroom_api"]["api_url"]
+            self.app_settings = default_config["app_settings"]
 
     @pyqtSlot(str, result=bool)
     def loadImage(self, file_url):
@@ -83,21 +144,32 @@ class ImageProcessor(QObject):
 
     def detect_face(self, image):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        
+        # Intentar con diferentes clasificadores en orden de precisión
+        faces = self.face_cascade.detectMultiScale(
+            gray, 
+            scaleFactor=1.3,  # Aumentar para ser más estricto
+            minNeighbors=6,   # Aumentar para reducir falsos positivos
+            minSize=(50, 50)  # Aumentar tamaño mínimo
+        )
         
         if len(faces) == 0:
-            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
+            # Segundo intento más permisivo
+            faces = self.face_cascade.detectMultiScale(
+                gray, 
+                scaleFactor=1.1,
+                minNeighbors=4,
+                minSize=(40, 40)
+            )
         
-        if len(faces) == 0:
-            eyes = self.eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            if len(eyes) >= 2:
-                eye1, eye2 = eyes[:2]
-                center_x = (eye1[0] + eye2[0]) // 2
-                center_y = (eye1[1] + eye2[1]) // 2
-                face_size = int(abs(eye1[0] - eye2[0]) * 3)
-                return [(center_x - face_size//2, center_y - face_size//2, face_size, face_size)]
+        # Filtrar por proporción (los rostros suelen ser más altos que anchos)
+        valid_faces = []
+        for (x, y, w, h) in faces:
+            aspect_ratio = h / w
+            if 0.8 < aspect_ratio < 1.8:  # Rostros tienen proporción cercana a 1:1.3
+                valid_faces.append((x, y, w, h))
         
-        return faces
+        return valid_faces if valid_faces else faces
 
     @pyqtSlot(float, float, float, float, result=bool)
     def centerFace(self, target_width, target_height, canvas_width, canvas_height):
@@ -156,42 +228,97 @@ class ImageProcessor(QObject):
         self.mask = None
         return True
     
-    @pyqtSlot()
-    def removeBackgroundWithU2Net(self):
-        """Elimina el fondo usando U-2-Net"""
+    @pyqtSlot(result=bool)
+    def removeBackgroundWithPhotoRoom(self):
+        """Elimina el fondo usando la API de PhotoRoom"""
         if self.centered_original is None or not self._isCentered:
             print("No hay imagen centrada para procesar")
+            self.processingStatusChanged.emit("No hay imagen centrada para procesar")
             return False
 
-        image = self.centered_original.copy()
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convertir a RGB para U-2-Net
-
-        # Preprocesar la imagen para el modelo U-2-Net
-        image_resized = cv2.resize(image_rgb, (320, 320))  # Redimensionar a 320x320
-        image_tensor = torch.tensor(image_resized).float().permute(2, 0, 1).unsqueeze(0) / 255.0  # Normaliza a [0, 1]
-
-        # Realizar la inferencia con U-2-Net
-        with torch.no_grad():
-            pred = self.u2net_model(image_tensor)  # Obtener la predicción de la máscara
-            pred = pred[0][0].cpu().numpy()  # Tomar la predicción de la máscara
+        try:
+            self.processingStatusChanged.emit("Procesando imagen con PhotoRoom...")
             
-        # Normalizar la máscara
-        pred = (pred - np.min(pred)) / (np.max(pred) - np.min(pred)) * 255
-        pred = np.uint8(pred)
-        _, binary_mask = cv2.threshold(pred, 127, 255, cv2.THRESH_BINARY)
-
-        # Aplicar la máscara a la imagen
-        binary_mask = cv2.cvtColor(binary_mask, cv2.COLOR_GRAY2BGR)
-        result = cv2.bitwise_and(image, binary_mask)
-
-        # Guardar la imagen procesada
-        self.background_removed_image = result
-        self.mask = binary_mask
-        self.image = result  # Actualizar la imagen procesada
-        self.imageChanged.emit()
-
-        print("Fondo eliminado exitosamente con U-2-Net")
-        return True
+            # Convertir la imagen OpenCV a bytes
+            image = self.centered_original.copy()
+            _, buffer = cv2.imencode('.jpg', image)
+            image_bytes = buffer.tobytes()
+            
+            # Preparar la solicitud a la API de PhotoRoom
+            url = self.photoroom_api_url
+            headers = {
+                "x-api-key": self.photoroom_api_key
+            }
+            
+            files = {
+                'image_file': ('image.jpg', image_bytes, 'image/jpeg')
+            }
+            
+            # Hacer la solicitud a la API
+            print("Enviando imagen a PhotoRoom API...")
+            response = requests.post(url, headers=headers, files=files)
+            
+            if response.status_code == 200:
+                # La respuesta es una imagen PNG con transparencia
+                response_image = Image.open(io.BytesIO(response.content))
+                
+                # Convertir PIL Image a numpy array
+                response_array = np.array(response_image)
+                
+                # Verificar si la imagen tiene canal alpha
+                if response_array.shape[2] == 4:
+                    # Extraer el canal alpha como máscara
+                    alpha_channel = response_array[:, :, 3]
+                    
+                    # Extraer los canales RGB
+                    rgb_image = response_array[:, :, :3]
+                    
+                    # Convertir RGB a BGR para OpenCV
+                    bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+                    
+                    # Crear máscara binaria desde el canal alpha
+                    # Normalizar alpha a rango 0-1 para usar como máscara de mezcla
+                    self.mask = alpha_channel.astype(np.float32) / 255.0
+                    
+                    # Crear imagen con fondo transparente (donde alpha = 0, poner negro)
+                    self.background_removed_image = bgr_image.copy()
+                    
+                    # Donde el alpha es 0 (fondo), poner píxeles en negro
+                    mask_3channel = np.stack([alpha_channel, alpha_channel, alpha_channel], axis=-1)
+                    self.background_removed_image = np.where(mask_3channel > 0, bgr_image, 0).astype(np.uint8)
+                    
+                    # Aplicar el color de fondo seleccionado
+                    self.applyBackgroundColor()
+                    
+                    print("Fondo eliminado exitosamente con PhotoRoom")
+                    self.processingStatusChanged.emit("Fondo eliminado exitosamente")
+                    return True
+                else:
+                    print("La imagen devuelta no tiene canal alpha")
+                    self.processingStatusChanged.emit("Error: imagen sin transparencia")
+                    return False
+                    
+            elif response.status_code == 402:
+                print("Error: Créditos de API agotados")
+                self.processingStatusChanged.emit("Error: Créditos de API agotados")
+                return False
+            elif response.status_code == 429:
+                print("Error: Límite de tasa excedido")
+                self.processingStatusChanged.emit("Error: Límite de tasa excedido. Intente más tarde")
+                return False
+            else:
+                print(f"Error en la API: {response.status_code} - {response.text}")
+                self.processingStatusChanged.emit(f"Error en la API: {response.status_code}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Error de red: {str(e)}")
+            self.processingStatusChanged.emit(f"Error de conexión: {str(e)}")
+            return False
+        except Exception as e:
+            print(f"Error inesperado: {str(e)}")
+            self.processingStatusChanged.emit(f"Error inesperado: {str(e)}")
+            return False
 
     def applyBackgroundColor(self):
         """Aplica el color de fondo seleccionado a la imagen sin fondo"""
@@ -206,7 +333,7 @@ class ImageProcessor(QObject):
         # Crear imagen con el nuevo fondo
         result = np.full_like(self.background_removed_image, bgr_color)
         
-        # Si la máscara es de punto flotante (de MediaPipe), usarla para mezcla suave
+        # La máscara es de punto flotante (0-1) desde PhotoRoom
         if self.mask.dtype == np.float32 or self.mask.dtype == np.float64:
             # Expandir la máscara a 3 canales
             mask_3channel = np.stack([self.mask, self.mask, self.mask], axis=-1)
@@ -216,8 +343,8 @@ class ImageProcessor(QObject):
                      result * (1 - mask_3channel)).astype(np.uint8)
         else:
             # Para máscaras binarias (compatibilidad)
-            mask_3channel = cv2.cvtColor(self.mask, cv2.COLOR_GRAY2BGR)
-            result = np.where(mask_3channel == 1, self.background_removed_image, result)
+            mask_3channel = np.stack([self.mask, self.mask, self.mask], axis=-1)
+            result = np.where(mask_3channel > 0, self.background_removed_image, result)
         
         # Actualizar la imagen centrada
         self.centered_image = result
@@ -267,7 +394,7 @@ class ImageProcessor(QObject):
         self.applyImageAdjustments()
 
         if show_data:
-            shift = int(self.image.shape[0] * overlay_height_ratio / 2.80)
+            shift = int(self.image.shape[0] * overlay_height_ratio / 3.44)
             black_image = np.zeros_like(self.image)
             black_image[:-shift, :] = self.image[shift:, :]
             self.image = black_image
@@ -281,18 +408,18 @@ class ImageProcessor(QObject):
             return False
 
         # Dimensiones del papel en milímetros (15.2 x 10.2 cm)
-        PAPER_WIDTH_MM = 152
-        PAPER_HEIGHT_MM = 102
+        PAPER_WIDTH_MM = self.app_settings.get("paper_width_mm", 152)
+        PAPER_HEIGHT_MM = self.app_settings.get("paper_height_mm", 102)
 
         # MÁRGENES DE SEGURIDAD PARA LA IMPRESORA (5mm en cada borde)
-        MARGIN_SAFETY_MM = 5
+        MARGIN_SAFETY_MM = self.app_settings.get("margin_safety_mm", 5)
         
         # Área útil del papel considerando márgenes de seguridad
         USABLE_WIDTH_MM = PAPER_WIDTH_MM - (2 * MARGIN_SAFETY_MM)  # 142 mm
         USABLE_HEIGHT_MM = PAPER_HEIGHT_MM - (2 * MARGIN_SAFETY_MM)  # 92 mm
 
         # Convertir mm a píxeles para 300 DPI
-        DPI = 300
+        DPI = self.app_settings.get("default_dpi", 300)
         MM_TO_PX = DPI / 25.4
 
         # Calcular dimensiones del papel en píxeles
@@ -309,7 +436,7 @@ class ImageProcessor(QObject):
         photo_height_px = photo_height_mm * MM_TO_PX
 
         # Margen entre fotos en mm
-        MARGIN_MM = 2
+        MARGIN_MM = self.app_settings.get("margin_between_photos_mm", 2)
         margin_px = MARGIN_MM * MM_TO_PX
 
         # Calcular cuántas fotos caben teóricamente en el área útil
@@ -340,25 +467,26 @@ class ImageProcessor(QObject):
             num_cols = 1
             num_rows = 1
         
-        # LÍMITE MÁXIMO: 8 copias para cualquier tamaño
+        # LÍMITE MÁXIMO: configurado en app_settings
+        MAX_PHOTOS = self.app_settings.get("max_photos_per_sheet", 8)
         total_photos = num_cols * num_rows
-        if total_photos > 8:
-            # Ajustar para no exceder 8 fotos
+        if total_photos > MAX_PHOTOS:
+            # Ajustar para no exceder el máximo de fotos
             if num_cols > 4:
                 num_cols = 4
-                num_rows = 2
+                num_rows = min(2, MAX_PHOTOS // 4)
             elif num_rows > 4:
                 num_rows = 4
-                num_cols = 2
+                num_cols = min(2, MAX_PHOTOS // 4)
             else:
-                # Buscar la mejor distribución para 8 fotos
-                if num_cols * num_rows > 8:
+                # Buscar la mejor distribución para el máximo de fotos
+                if num_cols * num_rows > MAX_PHOTOS:
                     if num_cols >= num_rows:
-                        num_cols = 4
-                        num_rows = 2
+                        num_cols = min(4, MAX_PHOTOS // 2)
+                        num_rows = min(2, MAX_PHOTOS // num_cols)
                     else:
-                        num_cols = 2
-                        num_rows = 4
+                        num_cols = min(2, MAX_PHOTOS // 4)
+                        num_rows = min(4, MAX_PHOTOS // num_cols)
 
         print(f"=== Configuración de impresión ===")
         print(f"Papel: {PAPER_WIDTH_MM}x{PAPER_HEIGHT_MM}mm (15.2x10.2 cm)")
@@ -468,7 +596,7 @@ class ImageProcessor(QObject):
             return
 
         printer = QPrinter(self.current_printer)
-        printer.setResolution(300)  # 300 DPI
+        printer.setResolution(self.app_settings.get("default_dpi", 300))  # DPI desde configuración
         printer.setFullPage(True)
         
         # Obtener el nombre de la impresora para aplicar configuración específica

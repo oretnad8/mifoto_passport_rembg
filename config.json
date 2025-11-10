@@ -1,0 +1,22 @@
+{
+  "photoroom_api": {
+    "api_key": "sandbox_sk_pr_default_befbd4b3ca922b362fb13086b8a398432af4c68d",
+    "api_url": "https://sdk.photoroom.com/v1/segment",
+    "mode": "sandbox",
+    "comment": "Para producción, cambia 'mode' a 'production' y actualiza la 'api_key'"
+  },
+  "app_settings": {
+    "default_dpi": 300,
+    "paper_width_mm": 152,
+    "paper_height_mm": 102,
+    "margin_safety_mm": 5,
+    "margin_between_photos_mm": 2,
+    "max_photos_per_sheet": 8
+  },
+  "image_processing": {
+    "face_detection_scale_factor": 1.1,
+    "face_detection_min_neighbors": 5,
+    "face_detection_min_size": [30, 30],
+    "face_crop_multiplier": 2.2
+  }
+}
